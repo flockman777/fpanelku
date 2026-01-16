@@ -1,0 +1,110 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  password      String
+  role          String   @default("user") // admin, reseller, user
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  licenses      License[]
+}
+
+model License {
+  id              String    @id @default(cuid())
+  licenseKey      String    @unique
+  userId          String?
+  user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  domain          String?
+  tier            String    @default("basic") // basic, professional, enterprise
+  status          String    @default("active") // active, suspended, expired
+  maxServers      Int       @default(1)
+  maxDomains      Int       @default(10)
+  maxStorageGB    Int       @default(5)
+  activatedAt     DateTime?
+  expiresAt       DateTime?
+  hardwareId      String?
+  gracePeriodEnd  DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model Domain {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  sslEnabled  Boolean  @default(false)
+  sslExpiry   DateTime?
+  path        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Database {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  username    String
+  password    String
+  sizeMB      Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Email {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  password    String
+  quota       Int      @default(1024) // in MB
+  used        Int      @default(0) // in MB
+  forwardTo   String?
+  autoReply   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model FTPUser {
+  id          String   @id @default(cuid())
+  username    String   @unique
+  password    String
+  homePath    String   @default("/")
+  quota       Int      @default(1024) // in MB
+  used        Int      @default(0) // in MB
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model CronJob {
+  id          String   @id @default(cuid())
+  name        String
+  command     String
+  schedule    String   // cron expression: "* * * * *"
+  enabled     Boolean  @default(true)
+  lastRun     DateTime?
+  nextRun     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Backup {
+  id          String   @id @default(cuid())
+  name        String
+  type        String   // "full", "database", "files"
+  path        String
+  size        Int      // in bytes
+  status      String   @default("completed") // pending, completed, failed
+  createdAt   DateTime @default(now())
+}
