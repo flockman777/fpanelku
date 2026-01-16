@@ -12,17 +12,22 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# GitHub Repository Configuration
+GITHUB_REPO="${GITHUB_REPO:-fpanel}"
+GITHUB_USER="${GITHUB_USER:-YOUR_USERNAME}"
+GITHUB_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git"
+
 # Functions
 print_banner() {
     echo -e "${BLUE}"
-    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "╔════════════════════════════════════════════════════════╗"
     echo "║                                                          ║"
     echo "║           FPanel - Mini Hosting Control Panel             ║"
-    echo "║                  Auto-Installer v1.0                     ║"
+    echo "║                  Auto-Installer v1.1                     ║"
     echo "║                                                          ║"
     echo "║              for Ubuntu 24.04 LTS                        ║"
     echo "║                                                          ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "╚════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
 
@@ -109,8 +114,6 @@ install_dependencies() {
         build-essential \
         python3 \
         python3-pip \
-        nodejs \
-        npm \
         nginx \
         sqlite3 \
         certbot \
@@ -128,6 +131,11 @@ install_dependencies() {
         print_success "Bun already installed"
     fi
 
+    # Get Bun installation path for systemd service
+    BUN_PATH=$(which bun)
+    echo "BUN_PATH=${BUN_PATH}" >> /etc/fpanel.env
+    print_success "Bun path: ${BUN_PATH}"
+
     print_success "Dependencies installed"
 }
 
@@ -135,22 +143,50 @@ setup_fpanel() {
     print_step "Setting up FPanel..."
 
     # Create FPanel directory
-    FPanel_DIR="/opt/fpanel"
-    mkdir -p "$FPanel_DIR"
-    cd "$FPanel_DIR"
+    FPANEL_DIR="/opt/fpanel"
+    mkdir -p "$FPANEL_DIR"
 
-    # Clone FPanel from GitHub (you'll need to push your code there)
-    print_step "Cloning FPanel from repository..."
-    # git clone https://github.com/YOUR_USERNAME/fpanel.git .
-    # For now, we'll assume the files are already here or you'll upload them
+    # Check if directory is empty or needs cloning
+    if [ -z "$(ls -A $FPANEL_DIR)" ]; then
+        print_step "Cloning FPanel from repository..."
+        git clone "$GITHUB_URL" "$FPANEL_DIR" || {
+            print_error "Failed to clone repository"
+            print_error "Please set GITHUB_USER and GITHUB_REPO variables or provide valid repository URL"
+            print_error "Example: GITHUB_USER=username GITHUB_REPO=fpanel bash install.sh"
+            exit 1
+        }
+    else
+        print_step "FPanel directory exists, skipping clone..."
+    fi
+
+    cd "$FPANEL_DIR"
 
     # Create necessary directories
-    mkdir -p "$FPanel_DIR/db"
-    mkdir -p "$FPanel_DIR/upload"
-    mkdir -p "$FPanel_DIR/logs"
+    mkdir -p "$FPANEL_DIR/db"
+    mkdir -p "$FPANEL_DIR/upload"
+    mkdir -p "$FPANEL_DIR/logs"
 
-    # Set permissions
-    chown -R www-data:www-data "$FPanel_DIR"
+    # Create .env file if not exists
+    if [ ! -f "$FPANEL_DIR/.env" ]; then
+        print_step "Creating environment file..."
+        cat > "$FPANEL_DIR/.env" << 'EOF'
+# Database
+DATABASE_URL="file:./db/custom.db"
+
+# JWT Secret (CHANGE THIS IN PRODUCTION!)
+JWT_SECRET="$(openssl rand -hex 32)"
+
+# Server
+PORT=3000
+NODE_ENV=production
+EOF
+        print_success "Environment file created"
+    else
+        print_step "Environment file already exists"
+    fi
+
+    # Create db backup directory
+    mkdir -p "$FPANEL_DIR/db/backup"
 
     print_success "FPanel directory created"
 }
@@ -158,21 +194,38 @@ setup_fpanel() {
 install_fpanel() {
     print_step "Installing FPanel dependencies..."
 
-    FPanel_DIR="/opt/fpanel"
-    cd "$FPanel_DIR"
+    FPANEL_DIR="/opt/fpanel"
+    cd "$FPANEL_DIR"
+
+    # Source Bun path
+    if [ -f /etc/fpanel.env ]; then
+        . /etc/fpanel.env
+    fi
+
+    # Ensure Bun is available
+    if ! command -v bun &> /dev/null; then
+        export BUN_INSTALL="$HOME/.bun"
+        export PATH="$BUN_INSTALL/bin:$PATH"
+    fi
 
     # Install npm dependencies
     if [ -f "package.json" ]; then
-        bun install
+        bun install --production=false
     fi
 
     # Push database schema
     if [ -f "prisma/schema.prisma" ]; then
-        bun run db:push
+        bun run db:push || {
+            print_warning "Database push failed, trying again..."
+            bun run db:push
+        }
     fi
 
-    # Build the application
-    bun run build
+    # Build application
+    bun run build || {
+        print_error "Build failed"
+        exit 1
+    }
 
     print_success "FPanel installed"
 }
@@ -187,6 +240,11 @@ server {
 
     # Maximum upload size
     client_max_body_size 100M;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
 
     # Proxy to FPanel
     location / {
@@ -220,7 +278,10 @@ EOF
     rm -f /etc/nginx/sites-enabled/default
 
     # Test and restart nginx
-    nginx -t
+    nginx -t || {
+        print_error "Nginx configuration test failed"
+        exit 1
+    }
     systemctl restart nginx
     systemctl enable nginx
 
@@ -230,18 +291,35 @@ EOF
 setup_systemd() {
     print_step "Setting up FPanel systemd service..."
 
-    cat > /etc/systemd/system/fpanel.service << 'EOF'
+    # Source Bun path
+    if [ -f /etc/fpanel.env ]; then
+        . /etc/fpanel.env
+    fi
+
+    # Use system-wide bun path or user's home
+    if [ -n "$BUN_PATH" ]; then
+        EXEC_BUN="$BUN_PATH"
+    elif [ -f "/root/.bun/bin/bun" ]; then
+        EXEC_BUN="/root/.bun/bin/bun"
+    elif [ -f "/home/root/.bun/bin/bun" ]; then
+        EXEC_BUN="/home/root/.bun/bin/bun"
+    else
+        EXEC_BUN="bun"
+    fi
+
+    cat > /etc/systemd/system/fpanel.service << EOF
 [Unit]
 Description=FPanel - Mini Hosting Control Panel
 After=network.target
 
 [Service]
 Type=simple
-User=www-data
+User=root
 WorkingDirectory=/opt/fpanel
 Environment=NODE_ENV=production
 Environment=PORT=3000
-ExecStart=/root/.bun/bin/bun run start
+EnvironmentFile=/opt/fpanel/.env
+ExecStart=$EXEC_BUN run start
 Restart=always
 RestartSec=10
 StandardOutput=append:/opt/fpanel/logs/fpanel.log
@@ -308,7 +386,7 @@ start_services() {
     # Start FPanel
     systemctl start fpanel
 
-    # Wait a moment for the service to start
+    # Wait a moment for service to start
     sleep 5
 
     # Check if service is running
@@ -323,9 +401,9 @@ start_services() {
 
 print_completion() {
     echo -e "${GREEN}"
-    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "╔════════════════════════════════════════════════════════╗"
     echo "║                    INSTALLATION COMPLETE!                 ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "╚════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo ""
     echo -e "${GREEN}FPanel has been successfully installed!${NC}"
@@ -336,6 +414,7 @@ print_completion() {
     echo "  - FPanel directory: ${BLUE}/opt/fpanel${NC}"
     echo "  - Logs directory: ${BLUE}/opt/fpanel/logs${NC}"
     echo "  - Database: ${BLUE}/opt/fpanel/db/custom.db${NC}"
+    echo "  - Environment: ${BLUE}/opt/fpanel/.env${NC}"
     echo "  - Service: ${BLUE}systemctl status fpanel${NC}"
     echo ""
     echo "Useful Commands:"
@@ -343,14 +422,18 @@ print_completion() {
     echo "  - Stop service: ${BLUE}systemctl stop fpanel${NC}"
     echo "  - Restart service: ${BLUE}systemctl restart fpanel${NC}"
     echo "  - View logs: ${BLUE}journalctl -u fpanel -f${NC}"
-    echo "  - Update FPanel: ${BLUE}cd /opt/fpanel && git pull && bun install && bun run build && systemctl restart fpanel${NC}"
+    echo "  - View error logs: ${BLUE}tail -f /opt/fpanel/logs/fpanel.error.log${NC}"
+    echo ""
+    echo "Update FPanel:"
+    echo "  ${BLUE}cd /opt/fpanel && git pull && bun install && bun run build && systemctl restart fpanel${NC}"
     echo ""
     echo "Next Steps:"
-    echo "  1. Access the panel at http://YOUR_SERVER_IP"
+    echo "  1. Access panel at http://YOUR_SERVER_IP"
     echo "  2. Create your admin account"
     echo "  3. Configure your license"
     echo "  4. Add your first domain"
     echo ""
+    echo -e "${YELLOW}IMPORTANT:${NC} Please update your JWT_SECRET in /opt/fpanel/.env"
 }
 
 # Main installation flow
@@ -361,7 +444,7 @@ main() {
     check_ubuntu
     check_resources
 
-    read -p "Do you want to continue with the installation? (y/n): " -n 1 -r
+    read -p "Do you want to continue with installation? (y/n): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         print_warning "Installation cancelled"
